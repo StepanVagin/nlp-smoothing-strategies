@@ -13,7 +13,12 @@ def load_tokens(path: Path) -> list[str]:
 
 
 def build_vocab(tokens: list[str], min_freq: int = 1) -> set[str]:
-    """Return a vocabulary set, excluding tokens that appear fewer than min_freq times."""
+    """Return a vocabulary set, excluding tokens that appear fewer than min_freq times.
+
+    When min_freq > 1, low-frequency tokens are intentionally excluded so the
+    caller can replace them with <unk> at training time, giving the UNK token
+    a real probability mass rather than treating it as a placeholder.
+    """
     counts = Counter(tokens)
     vocab = {tok for tok, c in counts.items() if c >= min_freq}
     vocab.add(UNK)
