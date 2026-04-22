@@ -124,6 +124,7 @@ def next_word_prediction_metrics(
     sample_size: int = 100,
     seed: int = 42,
     n_jobs: int | None = None,
+    positions: list[int] | None = None,
 ) -> dict:
     """
     Sample positions from test_tokens and rank every vocabulary word by
@@ -133,16 +134,19 @@ def next_word_prediction_metrics(
     pickling overhead). Each position scores |vocab| words and records the
     rank of the actual next word via counting rather than sorting.
 
+    If ``positions`` is provided it is used directly (no random sampling),
+    which lets callers pre-filter to e.g. unseen-context positions.
+
     Returns top1_accuracy, top5_accuracy, and mrr (mean reciprocal rank).
     """
     import random
 
-    random.seed(seed)
-
-    positions = list(range(order - 1, len(test_tokens)))
-    if len(positions) > sample_size:
-        positions = random.sample(positions, sample_size)
-    positions.sort()
+    if positions is None:
+        random.seed(seed)
+        positions = list(range(order - 1, len(test_tokens)))
+        if len(positions) > sample_size:
+            positions = random.sample(positions, sample_size)
+        positions.sort()
 
     if not positions:
         return {"top1_accuracy": 0.0, "top5_accuracy": 0.0, "mrr": 0.0}
