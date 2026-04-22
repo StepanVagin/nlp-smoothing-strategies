@@ -605,8 +605,9 @@ def fig8_decision_matrix(rows: list[dict]) -> None:
     ax.legend(handles=handles, loc="lower center", ncol=4, bbox_to_anchor=(0.5, -0.55), frameon=False)
 
     ax.set_title(
-        "Empirical Decision Guide — winner per regime with runner-up PPL ratio",
-        fontsize=13,
+        "Empirical Decision Guide — winner per regime with runner-up PPL ratio\n"
+        "(perplexity-based; for ranking/autocomplete tasks see Figure 9)",
+        fontsize=12,
         fontweight="bold",
         pad=14,
     )
@@ -617,6 +618,105 @@ def fig8_decision_matrix(rows: list[dict]) -> None:
     fig.savefig(PLOTS_DIR / "decision_matrix.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("  Figure 8: decision_matrix.png")
+
+
+# ---------------------------------------------------------------------------
+# Figure 9: Perplexity rank vs top-1 ranking rank — the metric contrast
+# ---------------------------------------------------------------------------
+
+# Results from next_word_task.ipynb at full corpus (fraction=1.0), 200 samples.
+_RANKING_RESULTS = {
+    # (order, split, method) -> {"top1": float, "top5": float, "mrr": float}
+    (2, "all",    "Laplace"):             {"top1": 15.50, "top5": 31.50, "mrr": 0.23986},
+    (2, "all",    "GoodTuring"):          {"top1": 15.50, "top5": 30.50, "mrr": 0.23484},
+    (2, "all",    "AbsoluteDiscounting"): {"top1": 15.00, "top5": 30.00, "mrr": 0.22792},
+    (2, "all",    "KneserNey"):           {"top1": 15.00, "top5": 30.50, "mrr": 0.22754},
+    (3, "all",    "Laplace"):             {"top1": 41.00, "top5": 65.00, "mrr": 0.52082},
+    (3, "all",    "GoodTuring"):          {"top1": 21.50, "top5": 41.50, "mrr": 0.30556},
+    (3, "all",    "AbsoluteDiscounting"): {"top1": 19.00, "top5": 39.50, "mrr": 0.28795},
+    (3, "all",    "KneserNey"):           {"top1": 18.00, "top5": 40.50, "mrr": 0.28026},
+    (2, "unseen", "Laplace"):             {"top1":  0.00, "top5":  4.50, "mrr": 0.04243},
+    (2, "unseen", "GoodTuring"):          {"top1":  0.00, "top5":  1.00, "mrr": 0.01437},
+    (2, "unseen", "AbsoluteDiscounting"): {"top1":  0.00, "top5":  1.50, "mrr": 0.01675},
+    (2, "unseen", "KneserNey"):           {"top1":  0.00, "top5":  1.00, "mrr": 0.01731},
+    (3, "unseen", "Laplace"):             {"top1": 32.50, "top5": 59.50, "mrr": 0.44748},
+    (3, "unseen", "GoodTuring"):          {"top1":  9.00, "top5": 21.00, "mrr": 0.15540},
+    (3, "unseen", "AbsoluteDiscounting"): {"top1": 10.00, "top5": 20.00, "mrr": 0.15966},
+    (3, "unseen", "KneserNey"):           {"top1":  9.00, "top5": 21.00, "mrr": 0.15354},
+}
+
+
+def fig9_metric_comparison(rows: list[dict]) -> None:
+    """Contrast perplexity rank vs top-1 rank at full corpus — the key tension.
+
+    Four panels arranged as a 2×2 grid:
+      rows = bigram / trigram
+      cols = perplexity (lower is better) / top-1 accuracy (higher is better)
+
+    Perplexity bars are normalised to the best method at that order so both
+    axes start near 1.0 / 0% and the gap is easy to read.
+    """
+    full_rows = [r for r in rows if r["fraction"] == 1.0]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle(
+        "Perplexity vs. Top-1 Ranking at Full Corpus (fraction = 1.0)\n"
+        "Same data, different metric — different winner",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    x = np.arange(len(METHOD_ORDER))
+    width = 0.55
+
+    for row_idx, order in enumerate([2, 3]):
+        gram = "Bigram" if order == 2 else "Trigram"
+
+        # --- left panel: normalised perplexity ---
+        ax_ppl = axes[row_idx][0]
+        ppls = {}
+        for r in full_rows:
+            if r["order"] == order and math.isfinite(r["perplexity"]):
+                ppls[r["method"]] = r["perplexity"]
+        best_ppl = min(ppls.values()) if ppls else 1.0
+        vals_ppl = [ppls.get(m, float("nan")) / best_ppl for m in METHOD_ORDER]
+        bars = ax_ppl.bar(x, vals_ppl, width, color=[COLORS[m] for m in METHOD_ORDER], alpha=0.85)
+        ax_ppl.axhline(1.0, color="black", linewidth=0.8, linestyle=":")
+        for bar, val in zip(bars, vals_ppl):
+            if math.isfinite(val):
+                ax_ppl.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    val + 0.05,
+                    f"×{val:.2f}",
+                    ha="center", va="bottom", fontsize=8.5,
+                )
+        ax_ppl.set_xticks(x)
+        ax_ppl.set_xticklabels([METHOD_LABELS[m] for m in METHOD_ORDER], rotation=15, ha="right", fontsize=9)
+        ax_ppl.set_ylabel("PPL / best-at-order (lower = better)")
+        ax_ppl.set_title(f"{gram} — Perplexity (relative)")
+        ax_ppl.set_ylim(0, max(v for v in vals_ppl if math.isfinite(v)) * 1.15)
+
+        # --- right panel: top-1 accuracy ---
+        ax_top1 = axes[row_idx][1]
+        vals_top1 = [_RANKING_RESULTS[(order, "all", m)]["top1"] for m in METHOD_ORDER]
+        bars2 = ax_top1.bar(x, vals_top1, width, color=[COLORS[m] for m in METHOD_ORDER], alpha=0.85)
+        for bar, val in zip(bars2, vals_top1):
+            ax_top1.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + 0.4,
+                f"{val:.1f}%",
+                ha="center", va="bottom", fontsize=8.5,
+            )
+        ax_top1.set_xticks(x)
+        ax_top1.set_xticklabels([METHOD_LABELS[m] for m in METHOD_ORDER], rotation=15, ha="right", fontsize=9)
+        ax_top1.set_ylabel("Top-1 Accuracy % (higher = better)")
+        ax_top1.set_title(f"{gram} — Top-1 Accuracy (all positions)")
+        ax_top1.set_ylim(0, max(vals_top1) * 1.18)
+
+    fig.tight_layout()
+    fig.savefig(PLOTS_DIR / "metric_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Figure 9: metric_comparison.png")
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +740,7 @@ def main() -> None:
     fig6_count_distribution()
     fig7_rare_word_perplexity(rows)
     fig8_decision_matrix(rows)
+    fig9_metric_comparison(rows)
 
     print(f"All figures saved to {PLOTS_DIR}/")
 
