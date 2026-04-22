@@ -1,7 +1,38 @@
 """Evaluation utilities for smoothed n-gram models."""
 
+import multiprocessing
+import os
+import threading
+
 from src.corpus import UNK
 from src.smoothing.base import Smoother
+
+# ---------------------------------------------------------------------------
+# Module-level state shared with forked worker processes.
+# Set by next_word_prediction_metrics() before creating the pool.
+# Guarded by _fork_lock so concurrent callers don't clobber each other.
+# ---------------------------------------------------------------------------
+_fork_lock = threading.Lock()
+_worker_smoother = None
+_worker_vocab_list: list[str] = []
+_worker_test_tokens: list[str] = []
+_worker_order: int = 2
+
+
+def _rank_position(i: int) -> int:
+    """Compute 1-based rank of the true next word at position i.
+
+    Rank = (# vocab words with strictly higher score) + 1.
+    Avoids a full sort: O(|vocab|) comparisons instead of O(|vocab| log |vocab|).
+    """
+    context = tuple(_worker_test_tokens[i - _worker_order + 1 : i])
+    actual = _worker_test_tokens[i]
+    actual_score = _worker_smoother.prob(actual, context)
+    n_better = sum(
+        1 for w in _worker_vocab_list
+        if w != actual and _worker_smoother.prob(w, context) > actual_score
+    )
+    return n_better + 1
 
 
 def run_evaluation(
@@ -76,19 +107,21 @@ def next_word_prediction_metrics(
     vocab: set[str],
     sample_size: int = 100,
     seed: int = 42,
+    n_jobs: int | None = None,
 ) -> dict:
     """
     Sample positions from test_tokens and rank every vocabulary word by
     log-probability given the preceding context.
 
-    For each sampled position the function calls smoother.prob() for all
-    vocabulary words, sorts them, and records the rank of the actual next word.
+    Positions are evaluated in parallel across CPU cores (fork-based, no
+    pickling overhead). Each position scores |vocab| words and records the
+    rank of the actual next word via counting rather than sorting.
 
     Returns top1_accuracy, top5_accuracy, and mrr (mean reciprocal rank).
-    Running time scales as sample_size × |vocab| × cost(prob), so expect
-    ~1-3 minutes for the default parameters on a 30 K vocabulary.
     """
     import random
+
+    global _worker_smoother, _worker_vocab_list, _worker_test_tokens, _worker_order
 
     random.seed(seed)
 
@@ -97,25 +130,28 @@ def next_word_prediction_metrics(
         positions = random.sample(positions, sample_size)
     positions.sort()
 
-    vocab_list = sorted(vocab)
-    hits1: list[int] = []
-    hits5: list[int] = []
-    rranks: list[float] = []
-
-    for i in positions:
-        context = tuple(test_tokens[i - order + 1 : i])
-        actual = test_tokens[i]
-        ranked = sorted(vocab_list, key=lambda w: smoother.prob(w, context), reverse=True)
-        rank = next(
-            (r + 1 for r, w in enumerate(ranked) if w == actual), len(vocab_list) + 1
-        )
-        hits1.append(1 if rank == 1 else 0)
-        hits5.append(1 if rank <= 5 else 0)
-        rranks.append(1.0 / rank)
-
-    n = len(rranks)
-    if n == 0:
+    if not positions:
         return {"top1_accuracy": 0.0, "top5_accuracy": 0.0, "mrr": 0.0}
+
+    workers = min(n_jobs or (os.cpu_count() or 1), len(positions))
+    ctx = multiprocessing.get_context("fork")
+
+    # Lock ensures concurrent callers don't race on the module globals that
+    # forked workers inherit.  Sequential callers pay zero contention cost.
+    with _fork_lock:
+        _worker_smoother = smoother
+        _worker_vocab_list = sorted(vocab)
+        _worker_test_tokens = test_tokens
+        _worker_order = order
+
+        with ctx.Pool(workers) as pool:
+            ranks = pool.map(_rank_position, positions)
+
+    hits1 = [1 if r == 1 else 0 for r in ranks]
+    hits5 = [1 if r <= 5 else 0 for r in ranks]
+    rranks = [1.0 / r for r in ranks]
+
+    n = len(ranks)
     return {
         "top1_accuracy": sum(hits1) / n,
         "top5_accuracy": sum(hits5) / n,
