@@ -517,99 +517,77 @@ def fig7_rare_word_perplexity(rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def fig8_decision_matrix(rows: list[dict]) -> None:
-    """Empirical decision guide: best method per (corpus size, n-gram order).
+def fig8_decision_matrix(_rows: list[dict]) -> None:
+    """Ranking-based decision guide: best method per (n-gram order, eval split).
 
-    Each cell is coloured by the winning method and annotated with the
-    runner-up's relative PPL so the practitioner can see how robust the
-    recommendation is.
+    Uses Top-1 accuracy as primary metric, Top-5 as tiebreaker, from
+    _RANKING_RESULTS at full corpus (fraction = 1.0).
     """
-    fracs = sorted({r["fraction"] for r in rows}, reverse=True)
     orders = [2, 3]
+    splits = ["all", "unseen"]
+    split_labels = {
+        "all": "All positions",
+        "unseen": "Unseen n-gram positions",
+    }
 
-    best = np.empty((len(orders), len(fracs)), dtype=object)
-    margin = np.full((len(orders), len(fracs)), np.nan)
+    def _cell(order: int, split: str):
+        res = {m: _RANKING_RESULTS[(order, split, m)] for m in METHOD_ORDER}
+        ranked = sorted(
+            METHOD_ORDER,
+            key=lambda m: (res[m]["top1"], res[m]["top5"], res[m]["mrr"]),
+            reverse=True,
+        )
+        winner, runner_up = ranked[0], ranked[1]
+        w, r = res[winner], res[runner_up]
+        # Pick the deciding metric: use top5 when top1 is 0 for everyone
+        if w["top1"] == 0 and r["top1"] == 0:
+            metric_label, w_val, r_val = "Top-5", w["top5"], r["top5"]
+        elif w["top1"] == r["top1"]:
+            metric_label, w_val, r_val = "Top-5", w["top5"], r["top5"]
+        else:
+            metric_label, w_val, r_val = "Top-1", w["top1"], r["top1"]
+        ratio = w_val / r_val if r_val > 0 else float("inf")
+        return winner, metric_label, w_val, ratio
+
+    fig, ax = plt.subplots(figsize=(10, 5))
 
     for i, order in enumerate(orders):
-        for j, frac in enumerate(fracs):
-            cell_rows = [
-                r
-                for r in rows
-                if r["order"] == order
-                and r["fraction"] == frac
-                and math.isfinite(r["perplexity"])
-            ]
-            if not cell_rows:
-                best[i][j] = None
-                continue
-            cell_rows.sort(key=lambda r: r["perplexity"])
-            winner = cell_rows[0]
-            best[i][j] = winner["method"]
-            if len(cell_rows) > 1:
-                margin[i][j] = cell_rows[1]["perplexity"] / winner["perplexity"]
-
-    fig, ax = plt.subplots(figsize=(14, 4.8))
-    color_map = {m: COLORS[m] for m in METHOD_ORDER}
-
-    for i in range(len(orders)):
-        for j in range(len(fracs)):
-            m = best[i][j]
-            color = color_map.get(m, "#E0E0E0") if m else "#E0E0E0"
+        for j, split in enumerate(splits):
+            winner, metric_label, w_val, ratio = _cell(order, split)
+            color = COLORS[winner]
             ax.add_patch(
-                plt.Rectangle((j, -i), 1, 1, facecolor=color, edgecolor="white", linewidth=2, alpha=0.85)
+                plt.Rectangle(
+                    (j, -i), 1, 1,
+                    facecolor=color, edgecolor="white", linewidth=2, alpha=0.85,
+                )
             )
-            if m is not None:
-                ratio = margin[i][j]
-                ratio_str = f"×{ratio:.2f}" if math.isfinite(ratio) else "—"
-                ax.text(
-                    j + 0.5,
-                    -i + 0.6,
-                    METHOD_LABELS[m],
-                    ha="center",
-                    va="center",
-                    fontsize=11,
-                    fontweight="bold",
-                    color="white",
-                )
-                ax.text(
-                    j + 0.5,
-                    -i + 0.25,
-                    f"runner-up {ratio_str}",
-                    ha="center",
-                    va="center",
-                    fontsize=8.5,
-                    color="white",
-                    alpha=0.9,
-                )
+            ratio_str = f"×{ratio:.2f}" if math.isfinite(ratio) else "—"
+            ax.text(j + 0.5, -i + 0.65, METHOD_LABELS[winner],
+                    ha="center", va="center", fontsize=11, fontweight="bold", color="white")
+            ax.text(j + 0.5, -i + 0.40, f"{metric_label}: {w_val:.1f}%",
+                    ha="center", va="center", fontsize=9, color="white", alpha=0.95)
+            ax.text(j + 0.5, -i + 0.20, f"runner-up {ratio_str}",
+                    ha="center", va="center", fontsize=8.5, color="white", alpha=0.9)
 
-    ax.set_xticks([j + 0.5 for j in range(len(fracs))])
-    n_tokens = {}
-    for r in rows:
-        n_tokens[r["fraction"]] = r["n_train_tokens"]
-    ax.set_xticklabels(
-        [
-            f"{frac}\n({n_tokens[frac]:,} tok)"
-            for frac in fracs
-        ],
-        fontsize=9,
-    )
+    ax.set_xlim(0, len(splits))
+    ax.set_ylim(-len(orders) + 1, 1)
+    ax.set_xticks([j + 0.5 for j in range(len(splits))])
+    ax.set_xticklabels([split_labels[s] for s in splits], fontsize=10)
     ax.set_yticks([-i + 0.5 for i in range(len(orders))])
     ax.set_yticklabels([f"n={o}" for o in orders], fontsize=11)
-    ax.set_xlim(0, len(fracs))
-    ax.set_ylim(-len(orders) + 1, 1)
-    ax.set_xlabel("Corpus fraction (and training tokens)")
+    ax.set_xlabel("Evaluation split  (full corpus, fraction = 1.0)")
 
-    # Legend swatches.
     from matplotlib.patches import Patch
     handles = [Patch(color=COLORS[m], label=METHOD_LABELS[m]) for m in METHOD_ORDER]
-    ax.legend(handles=handles, loc="lower center", ncol=4, bbox_to_anchor=(0.5, -0.55), frameon=False)
+    ax.legend(
+        handles=handles, loc="lower center", ncol=4,
+        bbox_to_anchor=(0.5, -0.28), frameon=False,
+    )
 
     ax.set_title(
-        "Empirical Decision Guide — winner per regime with runner-up PPL ratio\n"
-        "(perplexity-based; for ranking/autocomplete tasks see Figure 9)",
-        fontsize=12,
-        fontweight="bold",
-        pad=14,
+        "Empirical Decision Guide — winner per regime (Top-1 / Top-5 accuracy)\n"
+        "Primary metric: Top-1%; tiebreak: Top-5%  |  full corpus (fraction = 1.0)",
+        fontsize=12, fontweight="bold", pad=14,
     )
     ax.grid(False)
     ax.set_aspect("auto")
