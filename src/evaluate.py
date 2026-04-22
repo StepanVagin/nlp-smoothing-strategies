@@ -2,21 +2,37 @@
 
 import multiprocessing
 import os
+import sys
 import threading
 
 from src.corpus import UNK
 from src.smoothing.base import Smoother
 
 # ---------------------------------------------------------------------------
-# Module-level state shared with forked worker processes.
-# Set by next_word_prediction_metrics() before creating the pool.
-# Guarded by _fork_lock so concurrent callers don't clobber each other.
+# Module-level state shared with worker processes.
+#
+# On Linux/macOS we use "fork": children inherit the parent's memory via
+# copy-on-write so nothing needs to be pickled.  _fork_lock serialises
+# concurrent callers so they don't race on the globals before forking.
+#
+# On Windows "fork" is unavailable; we fall back to "spawn".  Spawned
+# workers start a fresh interpreter and receive state via _init_worker
+# (pickled once per worker, not once per task).
 # ---------------------------------------------------------------------------
 _fork_lock = threading.Lock()
 _worker_smoother = None
 _worker_vocab_list: list[str] = []
 _worker_test_tokens: list[str] = []
 _worker_order: int = 2
+
+
+def _init_worker(smoother, vocab_list: list[str], test_tokens: list[str], order: int) -> None:
+    """Pool initializer used on Windows (spawn). Sets worker-process globals."""
+    global _worker_smoother, _worker_vocab_list, _worker_test_tokens, _worker_order
+    _worker_smoother = smoother
+    _worker_vocab_list = vocab_list
+    _worker_test_tokens = test_tokens
+    _worker_order = order
 
 
 def _rank_position(i: int) -> int:
@@ -121,8 +137,6 @@ def next_word_prediction_metrics(
     """
     import random
 
-    global _worker_smoother, _worker_vocab_list, _worker_test_tokens, _worker_order
-
     random.seed(seed)
 
     positions = list(range(order - 1, len(test_tokens)))
@@ -134,18 +148,28 @@ def next_word_prediction_metrics(
         return {"top1_accuracy": 0.0, "top5_accuracy": 0.0, "mrr": 0.0}
 
     workers = min(n_jobs or (os.cpu_count() or 1), len(positions))
-    ctx = multiprocessing.get_context("fork")
+    vocab_list = sorted(vocab)
 
-    # Lock ensures concurrent callers don't race on the module globals that
-    # forked workers inherit.  Sequential callers pay zero contention cost.
-    with _fork_lock:
-        _worker_smoother = smoother
-        _worker_vocab_list = sorted(vocab)
-        _worker_test_tokens = test_tokens
-        _worker_order = order
-
-        with ctx.Pool(workers) as pool:
+    if sys.platform == "win32":
+        # spawn: fresh interpreter per worker; smoother pickled once per worker.
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(
+            workers,
+            initializer=_init_worker,
+            initargs=(smoother, vocab_list, test_tokens, order),
+        ) as pool:
             ranks = pool.map(_rank_position, positions)
+    else:
+        # fork: workers inherit parent memory via COW — nothing is pickled.
+        global _worker_smoother, _worker_vocab_list, _worker_test_tokens, _worker_order
+        ctx = multiprocessing.get_context("fork")
+        with _fork_lock:
+            _worker_smoother = smoother
+            _worker_vocab_list = vocab_list
+            _worker_test_tokens = test_tokens
+            _worker_order = order
+            with ctx.Pool(workers) as pool:
+                ranks = pool.map(_rank_position, positions)
 
     hits1 = [1 if r == 1 else 0 for r in ranks]
     hits5 = [1 if r <= 5 else 0 for r in ranks]
