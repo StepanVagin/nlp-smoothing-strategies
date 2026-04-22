@@ -49,10 +49,18 @@ class KneserNey(Smoother):
         self._tri_cont: dict[tuple[str, ...], dict[str, int]] = {}
         self._tri_cont_total: dict[tuple[str, ...], int] = {}
 
+        # Precomputed per-context totals and gamma weights (avoid recomputing per vocab word).
+        self._bigram_ctx_total: dict[tuple, int] = {}
+        self._bigram_gamma: dict[tuple, float] = {}
+        self._trigram_ctx_total: dict[tuple, int] = {}
+        self._trigram_gamma: dict[tuple, float] = {}
+        self._tri_cont_gamma: dict[tuple, float] = {}
+
     def fit(self, count_table: CountTable) -> None:
         self.ct = count_table
         self._estimate_discounts()
         self._build_continuation_counts()
+        self._precompute_gammas()
 
     def _estimate_discounts(self) -> None:
         """Estimate d1, d2, d3+ using the Chen & Goodman Y formula."""
@@ -82,6 +90,37 @@ class KneserNey(Smoother):
         self.d1 = max(0.01, min(self.d1, 0.99))
         self.d2 = max(0.01, min(self.d2, 1.99))
         self.d3 = max(0.01, min(self.d3, 2.99))
+
+    def _precompute_gammas(self) -> None:
+        """Precompute per-context totals and gamma weights used in prob()."""
+        assert self.ct is not None
+        d1, d2, d3 = self.d1, self.d2, self.d3
+
+        for ctx, words in self.ct.bigram_counts.items():
+            total = sum(words.values())
+            self._bigram_ctx_total[ctx] = total
+            if total > 0:
+                n1 = sum(1 for c in words.values() if c == 1)
+                n2 = sum(1 for c in words.values() if c == 2)
+                n3p = sum(1 for c in words.values() if c >= 3)
+                self._bigram_gamma[ctx] = (d1 * n1 + d2 * n2 + d3 * n3p) / total
+
+        for ctx, words in self.ct.trigram_counts.items():
+            total = sum(words.values())
+            self._trigram_ctx_total[ctx] = total
+            if total > 0:
+                n1 = sum(1 for c in words.values() if c == 1)
+                n2 = sum(1 for c in words.values() if c == 2)
+                n3p = sum(1 for c in words.values() if c >= 3)
+                self._trigram_gamma[ctx] = (d1 * n1 + d2 * n2 + d3 * n3p) / total
+
+        for ctx, cont_map in self._tri_cont.items():
+            total = self._tri_cont_total.get(ctx, 0)
+            if total > 0:
+                n1 = sum(1 for c in cont_map.values() if c == 1)
+                n2 = sum(1 for c in cont_map.values() if c == 2)
+                n3p = sum(1 for c in cont_map.values() if c >= 3)
+                self._tri_cont_gamma[ctx] = (d1 * n1 + d2 * n2 + d3 * n3p) / total
 
     def _build_continuation_counts(self) -> None:
         assert self.ct is not None
@@ -144,19 +183,15 @@ class KneserNey(Smoother):
     def _bigram_top(self, word: str, context: tuple[str, ...]) -> float:
         """Highest-order bigram P_kn(w | w1) using raw bigram counts."""
         assert self.ct is not None
-        ctx_counts = self.ct.bigram_counts.get(context, {})
-        count_ctx = sum(ctx_counts.values())
+        count_ctx = self._bigram_ctx_total.get(context, 0)
         if count_ctx == 0:
             return self._p_cont_unigram(word)
 
+        ctx_counts = self.ct.bigram_counts[context]
         count_cw = ctx_counts.get(word, 0)
         d = self._discount(count_cw) if count_cw > 0 else 0.0
         first = max(count_cw - d, 0.0) / count_ctx
-
-        n1_c = sum(1 for c in ctx_counts.values() if c == 1)
-        n2_c = sum(1 for c in ctx_counts.values() if c == 2)
-        n3p_c = sum(1 for c in ctx_counts.values() if c >= 3)
-        gamma = (self.d1 * n1_c + self.d2 * n2_c + self.d3 * n3p_c) / count_ctx
+        gamma = self._bigram_gamma.get(context, 0.0)
 
         return first + gamma * self._p_cont_unigram(word)
 
@@ -173,29 +208,21 @@ class KneserNey(Smoother):
         cont_cw = cont_map.get(word, 0)
         d = self._discount(cont_cw) if cont_cw > 0 else 0.0
         first = max(cont_cw - d, 0.0) / total
-
-        n1_c = sum(1 for c in cont_map.values() if c == 1)
-        n2_c = sum(1 for c in cont_map.values() if c == 2)
-        n3p_c = sum(1 for c in cont_map.values() if c >= 3)
-        gamma = (self.d1 * n1_c + self.d2 * n2_c + self.d3 * n3p_c) / total
+        gamma = self._tri_cont_gamma.get(context, 0.0)
 
         return first + gamma * self._p_cont_unigram(word)
 
     def _trigram_top(self, word: str, context: tuple[str, ...]) -> float:
         """Highest-order trigram with continuation bigram as lower order."""
         assert self.ct is not None
-        ctx_counts = self.ct.trigram_counts.get(context, {})
-        count_ctx = sum(ctx_counts.values())
+        count_ctx = self._trigram_ctx_total.get(context, 0)
         if count_ctx == 0:
             return self._p_cont_bigram(word, context[-1:])
 
+        ctx_counts = self.ct.trigram_counts[context]
         count_cw = ctx_counts.get(word, 0)
         d = self._discount(count_cw) if count_cw > 0 else 0.0
         first = max(count_cw - d, 0.0) / count_ctx
-
-        n1_c = sum(1 for c in ctx_counts.values() if c == 1)
-        n2_c = sum(1 for c in ctx_counts.values() if c == 2)
-        n3p_c = sum(1 for c in ctx_counts.values() if c >= 3)
-        gamma = (self.d1 * n1_c + self.d2 * n2_c + self.d3 * n3p_c) / count_ctx
+        gamma = self._trigram_gamma.get(context, 0.0)
 
         return first + gamma * self._p_cont_bigram(word, context[-1:])

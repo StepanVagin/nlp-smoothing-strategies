@@ -15,16 +15,15 @@ class AbsoluteDiscounting(Smoother):
 
     def __init__(self) -> None:
         self.ct: CountTable | None = None
+        self._bigram_ctx_total: dict[tuple, int] = {}
+        self._trigram_ctx_total: dict[tuple, int] = {}
 
     def fit(self, count_table: CountTable) -> None:
-        """Store the count table."""
         self.ct = count_table
+        self._bigram_ctx_total = {ctx: sum(w.values()) for ctx, w in count_table.bigram_counts.items()}
+        self._trigram_ctx_total = {ctx: sum(w.values()) for ctx, w in count_table.trigram_counts.items()}
 
     def prob(self, word: str, context: tuple[str, ...]) -> float:
-        """Return log P(word | context) with absolute discounting.
-
-        Recursively backs off from trigram -> bigram -> unigram (Laplace).
-        """
         assert self.ct is not None
 
         if len(context) == 0:
@@ -32,17 +31,17 @@ class AbsoluteDiscounting(Smoother):
 
         if len(context) >= 2:
             ctx = context[-2:]
-            ctx_counts = self.ct.trigram_counts.get(ctx, {})
-            count_ctx = sum(ctx_counts.values())
+            count_ctx = self._trigram_ctx_total.get(ctx, 0)
             if count_ctx == 0:
                 return self.prob(word, context[-1:])
+            ctx_counts = self.ct.trigram_counts[ctx]
             return self._discounted_prob(word, ctx, ctx_counts, count_ctx, context[-1:])
 
         # Bigram context (len == 1)
-        ctx_counts = self.ct.bigram_counts.get(context, {})
-        count_ctx = sum(ctx_counts.values())
+        count_ctx = self._bigram_ctx_total.get(context, 0)
         if count_ctx == 0:
             return self._unigram_laplace(word)
+        ctx_counts = self.ct.bigram_counts[context]
         return self._discounted_prob(word, context, ctx_counts, count_ctx, ())
 
     def _discounted_prob(
