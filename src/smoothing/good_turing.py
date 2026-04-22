@@ -44,12 +44,17 @@ class GoodTuring(Smoother):
         # For each order, the total adjusted count and the missing-mass P0.
         self._total: dict[int, float] = {}
         self._p0: dict[int, float] = {}
+        # Precomputed per-context totals (avoids sum() per vocab word call).
+        self._bigram_ctx_total: dict[tuple, int] = {}
+        self._trigram_ctx_total: dict[tuple, int] = {}
         # Cache alpha and normaliser per (context, order) to avoid O(vocab) recomputation.
         self._alpha_norm_cache: dict[tuple, tuple[float, float]] = {}
 
     def fit(self, count_table: CountTable) -> None:
         self.ct = count_table
         self._alpha_norm_cache.clear()
+        self._bigram_ctx_total = {ctx: sum(w.values()) for ctx, w in count_table.bigram_counts.items()}
+        self._trigram_ctx_total = {ctx: sum(w.values()) for ctx, w in count_table.trigram_counts.items()}
         for order in (1, 2, 3):
             n_c = self._compute_n_c(order)
             self._n_c[order] = n_c
@@ -104,14 +109,15 @@ class GoodTuring(Smoother):
             return max(p0 / n_unseen, 1.0 / (V * total))
 
         if order == 2:
-            ctx_counts = self.ct.bigram_counts.get(context, {})
+            count_ctx = self._bigram_ctx_total.get(context, 0)
+            if count_ctx == 0:
+                return self._prob(word, context[1:], order - 1)
+            ctx_counts = self.ct.bigram_counts[context]
         else:
-            ctx_counts = self.ct.trigram_counts.get(context, {})
-
-        count_ctx = sum(ctx_counts.values())
-        if count_ctx == 0:
-            # Unseen context: back off entirely to the lower order.
-            return self._prob(word, context[1:], order - 1)
+            count_ctx = self._trigram_ctx_total.get(context, 0)
+            if count_ctx == 0:
+                return self._prob(word, context[1:], order - 1)
+            ctx_counts = self.ct.trigram_counts[context]
 
         c = ctx_counts.get(word, 0)
         if c > 0:
