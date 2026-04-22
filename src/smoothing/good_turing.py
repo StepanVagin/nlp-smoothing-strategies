@@ -44,9 +44,12 @@ class GoodTuring(Smoother):
         # For each order, the total adjusted count and the missing-mass P0.
         self._total: dict[int, float] = {}
         self._p0: dict[int, float] = {}
+        # Cache alpha and normaliser per (context, order) to avoid O(vocab) recomputation.
+        self._alpha_norm_cache: dict[tuple, tuple[float, float]] = {}
 
     def fit(self, count_table: CountTable) -> None:
         self.ct = count_table
+        self._alpha_norm_cache.clear()
         for order in (1, 2, 3):
             n_c = self._compute_n_c(order)
             self._n_c[order] = n_c
@@ -116,23 +119,24 @@ class GoodTuring(Smoother):
             # Katz discount: use the rescaled count as the numerator.
             return c_star / count_ctx
 
-        # Seen context but unseen word: distribute leftover mass via backoff.
-        # Leftover α(ctx) = 1 - Σ_{w: c(ctx,w)>0} c*(c)/count_ctx
-        discounted_mass = 0.0
-        for cw in ctx_counts.values():
-            discounted_mass += self._c_star(cw, order) / count_ctx
-        alpha = max(1.0 - discounted_mass, 0.0)
+        # Seen context but unseen word: alpha and norm are the same for all
+        # unseen words given this context, so cache them to avoid recomputing
+        # O(|ctx_counts|) lower-order probs for every vocabulary word.
+        cache_key = (context, order)
+        if cache_key not in self._alpha_norm_cache:
+            discounted_mass = 0.0
+            for cw in ctx_counts.values():
+                discounted_mass += self._c_star(cw, order) / count_ctx
+            alpha = max(1.0 - discounted_mass, 0.0)
+            norm = self._backoff_normaliser(ctx_counts, context, order) if alpha > 0.0 else 1.0
+            self._alpha_norm_cache[cache_key] = (alpha, norm)
+        alpha, norm = self._alpha_norm_cache[cache_key]
+
         if alpha == 0.0:
             # Floor: at least 1 / (V * count_ctx) so perplexity stays finite.
             return 1.0 / (max(self.ct.vocab_size, 1) * count_ctx)
 
-        # Renormalise backoff over only the words unseen in this context.
         lower = self._prob(word, context[1:], order - 1)
-        # Normaliser: sum of lower-order probs over the unseen-word set.
-        # Approximated as 1 - Σ_{w seen} P_lower(w | shorter_ctx), with floor.
-        norm = self._backoff_normaliser(ctx_counts, context, order)
-        if norm <= 0:
-            norm = 1.0
         return alpha * lower / norm
 
     def _backoff_normaliser(
